@@ -2,18 +2,43 @@ import numpy as np
 import pandas as pd
 
 class LoadProfileDataLoader:
+    """
+    A utility class for loading and preprocessing microgrid load profile data from CSV files.
+
+    This class handles reading CSV data, performing necessary transformations like
+    datetime conversion, feature engineering (e.g., one-hot encoding for time-based features),
+    and filtering data based on date ranges.
+    """
 
     def __init__(self, csv_file_path: str):
-        
+        """
+        Initializes the LoadProfileDataLoader.
+
+        Args:
+            csv_file_path (str): The path to the CSV file containing the load profile data.
+        """
+
         self.file_path = csv_file_path
 
         
     def read_csv_file(self) -> pd.DataFrame:
+        """
+        Reads the CSV file specified during initialization.
+
+        Returns:
+            pd.DataFrame: A Pandas DataFrame containing the raw data from the CSV file.
+        """
 
         return pd.read_csv(self.file_path, header=0)
 
     
     def display_data(self, df: pd.DataFrame):
+        """
+        Prints information and summary statistics for the given DataFrame.
+
+        Args:
+            df (pd.DataFrame): The DataFrame to display information about.
+        """
 
         print(f"\nData successfully loaded from path => {self.file_path}\n")
 
@@ -26,7 +51,16 @@ class LoadProfileDataLoader:
 
     
     def convert_weekday(self, wkd: str) -> str:
-        
+        """
+        Converts a full weekday name (e.g., 'Monday') to a simplified category ('week', 'saturday', 'sunday').
+
+        Args:
+            wkd (str): The full weekday name.
+
+        Returns:
+            str: The simplified weekday category.
+        """
+
         if wkd in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
             return 'week'
         else:
@@ -34,6 +68,24 @@ class LoadProfileDataLoader:
 
     
     def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Preprocesses the raw load profile DataFrame.
+
+        This includes:
+        - Converting entry time to datetime objects.
+        - Extracting the hour of the day.
+        - One-hot encoding weekday and time-of-use (TOU) timeslots.
+        - Converting the hour into cyclical sine and cosine features.
+        - Setting the timestamp as the index.
+        - Dropping unnecessary original columns.
+        - Selecting and ordering the final set of features.
+
+        Args:
+            df (pd.DataFrame): The raw DataFrame to preprocess.
+
+        Returns:
+            pd.DataFrame: The preprocessed DataFrame with engineered features.
+        """
 
         df['timestamp'] = pd.to_datetime(df['entry_time'], format="mixed")
         df['ts_hour'] = df['timestamp'].dt.hour
@@ -61,6 +113,16 @@ class LoadProfileDataLoader:
 
 
     def load_data(self, from_date: str = None, to_date: str = None) -> pd.DataFrame:
+        """
+        Loads, preprocesses, and optionally filters the load profile data by date.
+
+        Args:
+            from_date (str, optional): The start date for filtering (YYYY-MM-DD). Defaults to None.
+            to_date (str, optional): The end date for filtering (YYYY-MM-DD). Defaults to None.
+
+        Returns:
+            pd.DataFrame: The processed (and potentially filtered) DataFrame.
+        """
 
         df = self.read_csv_file()
         
