@@ -26,6 +26,13 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 class DoubleDQNAgent:
+    """
+    A Double Deep Q-Network (DoubleDQN) agent for reinforcement learning.
+
+    This agent implements the Double DQN algorithm, which improves upon the standard DQN
+    by decoupling action selection and action evaluation to reduce overestimation bias.
+    It utilizes a target network, prioritized experience replay, and noisy layers for exploration.
+    """
 
     def __init__(self, env: gym.Env, 
                        discount_factor: float, 
@@ -42,7 +49,26 @@ class DoubleDQNAgent:
                        target_model_sync_steps: int, 
                        episode_len: int,
                        stop_reward: float):
+        """
+        Initializes the DoubleDQNAgent.
 
+        Args:
+            env: The Gymnasium environment.
+            discount_factor: The discount factor (gamma) for future rewards.
+            td_n_steps_unroll: The number of steps for N-step TD learning.
+            initial_lr: The initial learning rate for the optimizer.
+            final_lr_factor: The factor by which the initial learning rate will be multiplied at the end of training.
+            total_training_steps: The total number of training steps.
+            per_alpha: The alpha parameter for prioritized experience replay (controls prioritization).
+            per_beta: The initial beta parameter for prioritized experience replay (controls importance sampling).
+            per_beta_increment: The increment for beta per training step.
+            exp_batch_size: The size of the experience batch sampled from the replay buffer.
+            exp_buffer_size: The maximum size of the prioritized experience replay buffer.
+            exp_min_buffer_samples: The minimum number of samples in the buffer before training starts.
+            target_model_sync_steps: The number of steps after which the target network is synchronized with the main network.
+            episode_len: The length of each training episode.
+            stop_reward: The reward threshold at which training can be stopped.
+        """
         self.env = env
         self.discount_factor = discount_factor
         self.td_n_steps_unroll = td_n_steps_unroll
@@ -92,7 +118,9 @@ class DoubleDQNAgent:
 
 
     def display_dqn_net(self):
-
+        """
+        Displays the Double DQN model architecture and the compute device being used.
+        """
         log.info(f"\nTorch Compute Device -> {self.device}\n")
 
         log.info("Double DQN Model Architecture -> ")
@@ -100,7 +128,18 @@ class DoubleDQNAgent:
 
 
     def gather_agent_env_experiences(self) -> tuple:
+        """
+        Gathers experiences by allowing the agent to interact with the environment.
 
+        The agent populates the experience buffer until it has at least `exp_min_buffer_samples`.
+        Then, it samples a batch of experiences from the buffer using prioritized sampling.
+
+        Returns:
+            A tuple containing:
+                - exp_batch: A batch of experiences.
+                - indices: The indices of the sampled experiences in the buffer.
+                - weights: The importance sampling weights for the sampled experiences.
+        """
         for idx in range(self.exp_min_buffer_samples):
 
             # 1) Take the current environment observation as input and select an action 
@@ -132,7 +171,20 @@ class DoubleDQNAgent:
 
 
     def experience_batch_to_tensors(self, exp_batch: tt.List[ExperienceFirstLast]):
-        
+        """
+        Converts a batch of experiences into PyTorch tensors.
+
+        Args:
+            exp_batch: A list of ExperienceFirstLast objects.
+
+        Returns:
+            A tuple containing:
+                - states_t: Tensor of states.
+                - actions_t: Tensor of actions.
+                - rewards_t: Tensor of rewards.
+                - last_states_t: Tensor of next states.
+                - dones_t: Tensor indicating if the episode ended.
+        """
         states, actions, rewards, last_states, dones = [], [], [], [], []
         
         for e in exp_batch:
@@ -158,6 +210,22 @@ class DoubleDQNAgent:
 
     
     def calc_double_dqn_loss(self, exp_batch, weights) -> tuple:
+        """
+        Calculates the Double DQN loss.
+
+        This method implements the core Double DQN loss calculation, using the main network
+        to select the best action in the next state and the target network to evaluate that action.
+        It also incorporates importance sampling weights from the prioritized replay buffer.
+
+        Args:
+            exp_batch: A batch of experiences.
+            weights: Importance sampling weights for the batch.
+
+        Returns:
+            A tuple containing:
+                - loss: The calculated weighted mean squared error loss.
+                - td_errors: The temporal difference errors for each experience in the batch.
+        """
         states_v, actions_v, rewards_v, next_states_v, done_mask = self.experience_batch_to_tensors(exp_batch)
         
         # Convert weights to tensor
@@ -188,7 +256,12 @@ class DoubleDQNAgent:
 
     
     def calculate_total_episode_reward(self):
+        """
+        Calculates the total reward for the most recent episode stored in the experience buffer.
 
+        Returns:
+            The total reward for the episode.
+        """
         total_reward = 0.0
         
         for e in list(reversed(self.exp_buffer.buffer)):
@@ -202,6 +275,13 @@ class DoubleDQNAgent:
         
     
     def learn(self):
+        """
+        The main training loop for the Double DQN agent.
+
+        This method orchestrates the agent's interaction with the environment,
+        experience gathering, loss calculation, model optimization, and target network updates.
+        It also logs training progress to TensorBoard and saves the best model.
+        """
 
         episode_number = 0
         best_episode_reward = -999_999
