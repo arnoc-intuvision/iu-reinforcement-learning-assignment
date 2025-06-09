@@ -14,7 +14,7 @@ from ptan.experience import ExperienceFirstLast, ExperienceSourceFirstLast, Prio
 
 import gymnasium as gym
 
-from double_dqn_model import DoubleDQNModel
+from double_dqn_model_big import DoubleDQNModel
 
 import logging as log
 

@@ -6,6 +6,8 @@ from gymnasium import spaces
 from dataclasses import dataclass, field, asdict
 import traceback
 import logging as log
+from load_profile_data_loader import LoadProfileDataLoader
+
 
 log.basicConfig(format="Line:%(lineno)d-%(funcName)s-%(levelname)s:  %(message)s")
 log.getLogger().setLevel(log.INFO)
@@ -14,63 +16,38 @@ log.getLogger().setLevel(log.INFO)
 class EnvState:
     """
     Represents the state of the microgrid environment at a single timestep.
-
-    Attributes:
-        index (int): Current timestep index.
-        ts_hour_sin (float): Sine transformation of the hour of the day.
-        ts_hour_cos (float): Cosine transformation of the hour of the day.
-        tou_offpeak (int): Indicator for off-peak time-of-use tariff.
-        tou_standard (int): Indicator for standard time-of-use tariff.
-        tou_peak (int): Indicator for peak time-of-use tariff.
-        day_week (int): Indicator for a weekday.
-        day_saturday (int): Indicator for a Saturday.
-        day_sunday (int): Indicator for a Sunday.
-        site_load_energy (float): Energy consumed by the site (kWh).
-        solar_prod_energy (float): Energy produced by solar panels (kWh).
-        solar_ctlr_setpoint (float): Solar controller setpoint (%).
-        grid_import_energy (float): Energy imported from the grid (kWh).
-        grid_notified_maximum_demand (float): Notified maximum demand from the grid (kVA).
-        bess_avail_discharge_energy (float): Available energy in the BESS for discharge (kWh).
-        bess_capacity (float): Total capacity of the BESS (kWh).
-        bess_cycle_efficiency (float): Round-trip efficiency of the BESS.
-        bess_charge_from_solar_energy (float): Energy charged to BESS from solar (kWh).
-        bess_charge_from_grid_energy (float): Energy charged to BESS from grid (kWh).
-        bess_discharge_energy (float): Energy discharged from BESS (kWh).
-        bess_prev_action_name (str): Name of the previous BESS action.
-        bess_cycle_counter (int): Counter for BESS charge/discharge cycles.
-        tou_peak_tariff (float): Tariff rate during peak hours.
-        tou_standard_tariff (float): Tariff rate during standard hours.
-        tou_offpeak_tariff (float): Tariff rate during off-peak hours.
-        solar_ppa_tariff (float): Tariff for solar power purchase agreement.
-        debug_flag (bool): Flag to enable debug logging.
-        grid_surplus_energy (float): Calculated surplus energy available from the grid.
-        solar_surplus_energy (float): Calculated surplus energy available from solar.
-        solar_vs_load_ratio (float): Ratio of solar production to site load.
-        bess_soc (float): State of Charge of the BESS (%).
-        action_name (str): Name of the current BESS action.
-        reward_earned (float): Reward earned at the current timestep.
+    Holds both scaled values for agent observation and unscaled values for internal environment logic.
     """
-
+    
+    # Scaled features for agent observation
     index: int
-    ts_hour_sin: float	
-    ts_hour_cos: float	
-    tou_offpeak: int	
-    tou_standard: int	
-    tou_peak: int	
-    day_week: int	
-    day_saturday: int	
-    day_sunday: int	
-    site_load_energy: float 	
-    solar_prod_energy: float
+    ts_hour_sin: float
+    ts_hour_cos: float
+    tou_offpeak: int
+    tou_standard: int
+    tou_peak: int
+    day_week: int
+    day_saturday: int
+    day_sunday: int
+    site_load_energy: float    
+    solar_prod_energy: float   
     solar_ctlr_setpoint: float
     grid_import_energy: float
+
+    # Unscaled values for internal environment logic & reward calculation
+    site_load_energy_unscaled: float
+    solar_prod_energy_unscaled: float
+    solar_ctlr_setpoint_unscaled: float
+    grid_import_energy_unscaled: float
+
+    # Other parameters mostly unscaled
     grid_notified_maximum_demand: float
     bess_avail_discharge_energy: float
     bess_capacity: float
     bess_cycle_efficiency:float
     bess_charge_from_solar_energy: float
-    bess_charge_from_grid_energy: float
-    bess_discharge_energy: float
+    bess_charge_from_grid_energy: float  
+    bess_discharge_energy: float         
     bess_prev_action_name: str
     bess_cycle_counter: int
     tou_peak_tariff: float
@@ -78,87 +55,90 @@ class EnvState:
     tou_offpeak_tariff:float
     solar_ppa_tariff: float
     debug_flag: bool
+
+    # Calculated fields which use unscaled values for their logic
     grid_surplus_energy: float = field(init=False)
-    solar_surplus_energy: float = field(init=False)
+    solar_surplus_energy: float = field(init=False)  
     solar_vs_load_ratio: float = field(init=False)
-    bess_soc: float = field(init=False)
+    bess_soc: float = field(init=False)              
+
     action_name: str = field(init=False)
     reward_earned: float = field(init=False)
+
 
     def __post_init__(self):
         """
         Post-initialization processing for calculated fields.
-        Calculates grid surplus, solar surplus, solar vs load ratio, and BESS SOC.
         """
-
         self.grid_surplus_energy = self.get_grid_surplus_energy()
         self.solar_surplus_energy = self.get_solar_surplus_energy()
         self.solar_vs_load_ratio = self.get_solar_vs_load_ratio()
         self.bess_soc = self.get_bess_soc()
 
+
     def get_gym_state(self):
         """
         Returns the environment state formatted as a NumPy array for the Gym environment.
-
-        Returns:
-            np.array: A NumPy array representing the observable state.
+        Uses SCALED features for the observation. BESS SOC is calculated and then scaled.
         """
 
-        return np.array([self.ts_hour_sin, 
-                         self.ts_hour_cos,
-                         self.tou_offpeak, 
-                         self.tou_standard, 
-                         self.tou_peak,
-                         self.day_week, 
-                         self.day_saturday, 
-                         self.day_sunday,
-                         self.grid_import_energy, 
-                         self.solar_prod_energy, 
-                         self.solar_ctlr_setpoint,  
-                         self.bess_soc]) 
+        # Scale BESS SOC from [0, 100] to [-1, 1]
+        scaled_bess_soc = (self.bess_soc / 50.0) - 1.0
 
-    
+        return np.array([self.ts_hour_sin,
+                         self.ts_hour_cos,
+                         self.tou_offpeak,
+                         self.tou_standard,
+                         self.tou_peak,
+                         self.day_week,
+                         self.day_saturday,
+                         self.day_sunday,
+                         self.grid_import_energy,   
+                         self.solar_prod_energy,   
+                         self.solar_ctlr_setpoint, 
+                         scaled_bess_soc], dtype=np.float32)
+
+
     def get_grid_surplus_energy(self) -> float:
         """
-        Calculates the surplus energy available from the grid.
+        Calculates the surplus energy available from the grid using UNSCALED values.
         This is the difference between the notified maximum demand and the current grid import.
 
         Returns:
             float: The grid surplus energy in kWh, rounded to 2 decimal places.
         """
+        return np.round(self.grid_notified_maximum_demand - self.grid_import_energy_unscaled, 2)
 
-        return np.round(self.grid_notified_maximum_demand - self.grid_import_energy, 2)
 
-    
     def get_solar_surplus_energy(self) -> float:
         """
-        Calculates the surplus solar energy that is not being used or stored.
+        Calculates the surplus solar energy that is not being used or stored using UNSCALED values.
         This is the difference between potential full solar production and actual solar production
-        based on the controller setpoint.
+        based on the controller setpoint. solar_ctlr_setpoint_unscaled is 0-100.
 
         Returns:
             float: The solar surplus energy in kWh, rounded to 2 decimal places.
         """
 
-        ctl_setpoint_ratio = self.solar_ctlr_setpoint / 100.0
+        ctl_setpoint_ratio = self.solar_ctlr_setpoint_unscaled / 100.0
         
-        solar_prod_full = self.solar_prod_energy / (ctl_setpoint_ratio + 1e-6)
+        solar_prod_full = self.solar_prod_energy_unscaled / (ctl_setpoint_ratio + 1e-6)
         
-        solar_prod_surplus = solar_prod_full - self.solar_prod_energy
+        solar_prod_surplus = solar_prod_full - self.solar_prod_energy_unscaled
 
         if self.debug_flag:
-
             log.info(f"""
             [{self.index}] Solar Surplus Energy Calculation ->
+                    Control Setpoint: {self.solar_ctlr_setpoint_unscaled: .2f}%
                     Control Setpoint Ratio: {ctl_setpoint_ratio: .2f}
-                    Solar Production Energy: {self.solar_prod_energy: .2f}
-                    Solar Full Production Energy: {solar_prod_full: .2f}
-                    Solar Surplus Production Energy: {solar_prod_surplus: .2f}
+                    Solar Production Energy: {self.solar_prod_energy_unscaled: .2f} kWh
+                    Solar Full Production Energy: {solar_prod_full: .2f} kWh
+                    Solar Surplus Production Energy: {solar_prod_surplus: .2f} kWh
              """)
         
         return np.round(solar_prod_surplus, 2)
 
-    
+
     def get_solar_vs_load_ratio(self) -> float:
         """
         Calculates the ratio of current solar production to the current site load.
@@ -166,25 +146,23 @@ class EnvState:
         Returns:
             float: The solar production vs. site load ratio as a percentage, rounded to 2 decimal places.
         """
+        return np.round((self.solar_prod_energy_unscaled / (self.site_load_energy_unscaled + 1e-6)) * 100.0, 2)
 
-        return np.round((self.solar_prod_energy / (self.site_load_energy + 1e-6)) * 100.0, 2)
 
-    
-    def get_bess_soc(self) -> float: 
+    def get_bess_soc(self) -> float:
         """
         Calculates the State of Charge (SOC) of the BESS.
 
         Returns:
-            float: The BESS SOC as a percentage, rounded to 2 decimal places.
+            float: The BESS SOC as a percentage (0-100), rounded to 2 decimal places.
         """
-
         return np.round((self.bess_avail_discharge_energy / self.bess_capacity) * 100.0, 2)
 
-    
+
     def calculate_bess_charge_cost(self) -> float:
         """
         Calculates the cost of charging the BESS from the grid and solar.
-
+        
         Returns:
             float: The total cost of charging the BESS, rounded to 2 decimal places.
         """
@@ -219,7 +197,7 @@ class EnvState:
     def calculate_bess_discharge_saving(self) -> float:
         """
         Calculates the savings achieved by discharging the BESS instead of importing from the grid.
-
+       
         Returns:
             float: The total savings from BESS discharge, rounded to 2 decimal places.
         """
@@ -291,7 +269,6 @@ class EnvState:
         Returns:
             float: Estimated potential future charging cost.
         """
-
         avg_lower_cost_grid_tariffs = 1.0
         
         if self.tou_peak:
@@ -306,7 +283,6 @@ class EnvState:
             
             avg_lower_cost_grid_tariffs = (self.tou_standard_tariff + self.tou_peak_tariff) / 2
 
-        
         grid_charge_energy = (self.bess_discharge_energy / self.bess_cycle_efficiency) - self.solar_surplus_energy
         
         if grid_charge_energy < 0:
@@ -320,13 +296,13 @@ class EnvState:
         if self.debug_flag:
 
             log.info(f"""
-            [{self.index}] Future BESS Charge Cost (Discharging): {future_charge_cost: .2f}
-                    BESS Grid Charge Energy: {grid_charge_energy: .2f}
-                    BESS Solar Charge Energy: {solar_charge_energy: .2f}
-                    BESS SoC: {self.bess_soc: .2f}
+            [{self.index}] Future BESS Charge Cost (Discharging) -> {future_charge_cost: .2f}
+                    BESS Grid Charge Energy: {grid_charge_energy: .2f} kWh
+                    BESS Solar Charge Energy: {solar_charge_energy: .2f} kWh
+                    Solar Surplus Energy Available: {self.solar_surplus_energy: .2f} kWh
+                    BESS SoC: {self.bess_soc: .2f}%
                     TOU Timeslot: Peak={self.tou_peak} , Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
             """)
-
         return future_charge_cost
 
 
@@ -338,7 +314,6 @@ class EnvState:
         Returns:
             float: Potential current discharge savings.
         """
-
         current_tariff = 1.0
         
         if self.tou_peak:
@@ -353,16 +328,15 @@ class EnvState:
             
             current_tariff = self.tou_offpeak_tariff
         
-        potential_current_discharge_saving = np.round((current_tariff * self.grid_import_energy * self.bess_cycle_efficiency), 2)
+        potential_current_discharge_saving = np.round((current_tariff * self.grid_import_energy_unscaled * self.bess_cycle_efficiency), 2)
 
         if self.debug_flag:
-
             log.info(f"""
-            [{self.index}] Potential Current BESS Discharge Savings (Do-Nothing): {potential_current_discharge_saving: .2f}
-                    BESS SoC: {self.bess_soc: .2f}
+            [{self.index}] Potential Current BESS Discharge Savings (Do-Nothing) -> {potential_current_discharge_saving: .2f}
+                    Grid Import Energy Unscaled: {self.grid_import_energy_unscaled: .2f} kWh
+                    BESS SoC: {self.bess_soc: .2f}%
                     TOU Timeslot: Peak={self.tou_peak} , Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
             """)
-
         return potential_current_discharge_saving
 
 
@@ -370,7 +344,7 @@ class EnvState:
         """
         Calculates the potential cost if the BESS were to charge now
         instead of doing nothing, considering available solar and grid surplus.
-
+        
         Returns:
             float: Potential current charging cost.
         """
@@ -396,6 +370,7 @@ class EnvState:
             log.info(f"""
             [{self.index}] Potential Current BESS Charge Cost (Do-Nothing): {potential_current_charge_cost: .2f}
                     BESS SoC: {self.bess_soc: .2f}
+                    TOU Timeslot: Peak={self.tou_peak} , Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
             """)
 
         return potential_current_charge_cost
@@ -404,27 +379,25 @@ class EnvState:
     def calculate_without_bess_cost(self) -> float:
         """
         Calculates the cost of operating the microgrid without the BESS.
-        This serves as a baseline for comparison.
 
         Returns:
             float: The operational cost without BESS.
         """
-
         grid_cost = 0.0
 
         if self.tou_peak:
             
-            grid_cost = self.tou_peak_tariff * self.grid_import_energy
+            grid_cost = self.tou_peak_tariff * self.grid_import_energy_unscaled
             
         elif self.tou_standard:
             
-            grid_cost = self.tou_standard_tariff * self.grid_import_energy
+            grid_cost = self.tou_standard_tariff * self.grid_import_energy_unscaled
             
         elif self.tou_offpeak:
             
-            grid_cost = self.tou_offpeak_tariff * self.grid_import_energy
+            grid_cost = self.tou_offpeak_tariff * self.grid_import_energy_unscaled
 
-        solar_cost = self.solar_ppa_tariff * self.solar_prod_energy
+        solar_cost = self.solar_ppa_tariff * self.solar_prod_energy_unscaled
 
         total_cost = np.round((grid_cost + solar_cost), 2)
 
@@ -554,18 +527,20 @@ class MicrogridEnv(gymnasium.Env):
   A custom Gymnasium environment for simulating a microgrid with a BESS.
 
   This environment models the interaction between solar generation, site load,
-  grid electricity, and a Battery Energy Storage System (BESS). The agent's goal
+  grid electricity, and a Battery Energy Storage System (BESS). The agent\'s goal
   is to learn a policy for BESS charging and discharging to minimize operational
   costs or maximize savings, considering time-of-use tariffs and other factors.
   """
 
-  def __init__(self, data: pd.DataFrame, grid_notified_maximum_demand: float, bess_capacity:float, bess_cycle_efficiency: float, bess_step_sizes: list, 
-                                         tou_peak_tariff: float, tou_standard_tariff: float, tou_offpeak_tariff: float, solar_ppa_tariff: float, debug_flag: bool):
+  def __init__(self, data: pd.DataFrame, loader: LoadProfileDataLoader,
+               grid_notified_maximum_demand: float, bess_capacity:float, bess_cycle_efficiency: float, bess_step_sizes: list,
+               tou_peak_tariff: float, tou_standard_tariff: float, tou_offpeak_tariff: float, solar_ppa_tariff: float, debug_flag: bool):
       """
       Initializes the MicrogridEnv.
 
       Args:
           data (pd.DataFrame): DataFrame containing the load profile and solar generation data.
+          loader (LoadProfileDataLoader): Instance of the data loader for scaling information.
           grid_notified_maximum_demand (float): The notified maximum demand from the grid (kVA).
           bess_capacity (float): The total capacity of the BESS (kWh).
           bess_cycle_efficiency (float): The round-trip efficiency of the BESS (0.0 to 1.0).
@@ -581,16 +556,16 @@ class MicrogridEnv(gymnasium.Env):
       super(MicrogridEnv).__init__()
 
       self.env_data = data
-      
+      self.loader = loader
+
       self.action_space = spaces.Discrete(5)
       self.action_space_dict = {0: 'charge-1000', 1: 'charge-250', 2: 'do-nothing', 3: 'discharge-250', 4: 'discharge-1000'}
-
-      self.observation_space = np.array([ float(0), float(0), int(0), int(0), int(0), int(0), int(0), int(0), float(0), float(0), float(0), float(0) ])
+      self.observation_space = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
       
       self.state = None
       self.state_idx = 0
       self.reward = 0.0
-      self.reward_scale_factor = self.env_data['grid_import_energy'].max()
+      self.reward_scale_factor = 100.0
       self.done = False
       self.truncated = False
       self.debug_flag = debug_flag
@@ -638,17 +613,44 @@ class MicrogridEnv(gymnasium.Env):
 
   def load_new_state(self):
       """
-      Loads the data for the current timestep and constructs an EnvState object.
+      Loads the data for the current timestep.
+      Fetches SCALED data for observation, then INVERSE-TRANSFORMS necessary
+      features to their UNSCALED (physical) values for EnvState internal logic.
 
       Returns:
           EnvState: An object representing the current state of the environment.
       """
+      load_profile_data_scaled = self.get_data()
+      obs_scaled = load_profile_data_scaled.iloc[self.state_idx, :]
 
-      load_profile_data = self.get_data()
+      # Contains scaled site_load_energy, solar_prod_energy etc.
+      state_obj = obs_scaled.to_dict() 
 
-      obs = load_profile_data.iloc[self.state_idx, : ]
+      # Inverse-transform features needed for internal logic
+      columns_to_unscale = {
+          'site_load_energy': 'site_load_energy_unscaled',
+          'solar_prod_energy': 'solar_prod_energy_unscaled',
+          'solar_ctlr_setpoint': 'solar_ctlr_setpoint_unscaled',
+          'grid_import_energy': 'grid_import_energy_unscaled'
+      }
 
-      state_obj = obs.to_dict()
+      for scaled_col, unscaled_col_name in columns_to_unscale.items():
+          
+          if scaled_col in self.loader.scalers:
+              
+              scaler = self.loader.scalers[scaled_col]
+              scaled_value = obs_scaled[scaled_col]
+              unscaled_value = scaler.inverse_transform(np.array([[scaled_value]]))[0, 0]
+              state_obj[unscaled_col_name] = unscaled_value
+
+          else:
+             
+              state_obj[unscaled_col_name] = obs_scaled[scaled_col]
+
+              if self.debug_flag:
+                  log.warning(f"Scaler for '{scaled_col}' not found. Using its scaled value for '{unscaled_col_name}'.")
+
+
       state_obj['index'] = self.state_idx
       state_obj['grid_notified_maximum_demand'] = self.grid_notified_maximum_demand
       state_obj['bess_capacity'] = self.bess_capacity
@@ -671,31 +673,32 @@ class MicrogridEnv(gymnasium.Env):
   def render(self, mode="human"):
       """
       Renders the current state of the environment.
-      For "human" mode, it prints key state variables.
-
-      Args:
-          mode (str): The rendering mode. Currently only "human" is supported.
+      For "human" mode, it prints key state variables, including unscaled for clarity.
       """
-
+      
       print(f"""
         [{self.state.index}] Environment State ->
-                hour_sin: {self.state.ts_hour_sin: .4f}
-                hour_cos: {self.state.ts_hour_cos: .4f}
-                tou_offpeak: {self.state.tou_offpeak: .0f}
-                tou_standard: {self.state.tou_standard: .0f}
-                tou_peak: {self.state.tou_peak: .0f}
-                day_week: {self.state.day_week: .0f}
-                day_saturday: {self.state.day_saturday: .0f}
-                day_sunday: {self.state.day_sunday: .0f}
-                site_load_energy: {self.state.site_load_energy: .2f} (kWh)
-                solar_prod_energy: {self.state.solar_prod_energy: .2f} (kWh)
-                solar_ctlr_setpoint: {self.state.solar_ctlr_setpoint: .2f} (%)
-                solar_vs_load_ratio: {self.state.get_solar_vs_load_ratio(): .2f} (%)
-                grid_import_energy: {self.state.grid_import_energy: .2f} (kWh)
+                hour_sin: {self.state.ts_hour_sin: .4f} (scaled)
+                hour_cos: {self.state.ts_hour_cos: .4f} (scaled)
+                tou_offpeak: {self.state.tou_offpeak}
+                tou_standard: {self.state.tou_standard}
+                tou_peak: {self.state.tou_peak}
+                day_week: {self.state.day_week}
+                day_saturday: {self.state.day_saturday}
+                day_sunday: {self.state.day_sunday}
+                site_load_energy: {self.state.site_load_energy: .2f} (scaled), {self.state.site_load_energy_unscaled: .2f} (kWh)
+                solar_prod_energy: {self.state.solar_prod_energy: .2f} (scaled), {self.state.solar_prod_energy_unscaled: .2f} (kWh)
+                solar_ctlr_setpoint: {self.state.solar_ctlr_setpoint: .2f} (scaled), {self.state.solar_ctlr_setpoint_unscaled: .2f} (%)
+                solar_vs_load_ratio: {self.state.solar_vs_load_ratio: .2f} (%) (uses unscaled)
+                grid_import_energy: {self.state.grid_import_energy: .2f} (scaled), {self.state.grid_import_energy_unscaled: .2f} (kWh)
+                grid_surplus_energy: {self.state.grid_surplus_energy: .2f} (kWh) (uses unscaled)
+                solar_surplus_energy: {self.state.solar_surplus_energy: .2f} (kWh) (uses unscaled)
                 bess_capacity: {self.state.bess_capacity: .2f} (kWh)
-                bess_cycle_efficiency: {self.state.bess_cycle_efficiency: .2f} (kWh)
+                bess_cycle_efficiency: {self.state.bess_cycle_efficiency: .2f}
                 bess_avail_discharge_energy: {self.state.bess_avail_discharge_energy: .2f} (kWh)
-                bess_soc: {self.state.bess_soc: .2f}
+                bess_soc: {self.state.bess_soc: .2f} (%)
+                action_name: {self.state.action_name}
+                reward_earned (raw): {self.state.reward_earned: .3f} 
                 done: {self.done}
         """)
 
@@ -765,6 +768,15 @@ class MicrogridEnv(gymnasium.Env):
       else:
           # Default action is to do nothing
           action_idx = do_nothing_idx
+
+      if self.debug_flag:
+          
+          log.info(f"""
+            [{self.state.index}] Rule-Based Policy Selected Action -> {self.action_space_dict[action_idx]}:
+                Solar Surplus Energy: {self.state.solar_surplus_energy: .2f} kWh
+                BESS Available Discharge Energy: {self.state.bess_avail_discharge_energy: .2f} kWh
+                TOU Timeslot: Peak={self.state.tou_peak}, Standard={self.state.tou_standard}, Off-peak={self.state.tou_offpeak}
+            """)
       
       return action_idx
 
@@ -772,13 +784,9 @@ class MicrogridEnv(gymnasium.Env):
   def calculate_bess_charge_energy(self, action: int):
       """
       Calculates the actual BESS charge energy based on the selected action,
-      solar surplus, grid surplus, and BESS available capacity.
-
-      Args:
-          action (int): The action index corresponding to a charge action.
-                       Uses `self.bess_step_sizes[action]` to get the desired charge amount.
+      UNSCALED solar surplus, UNSCALED grid surplus, and BESS available capacity.
+      Updates self.state.bess_charge_from_solar_energy and self.state.bess_charge_from_grid_energy (in kWh).
       """
-
       charge_step_size = self.bess_step_sizes[action]
       
       required_charge_from_grid_import_energy = charge_step_size - self.state.solar_surplus_energy
@@ -834,21 +842,17 @@ class MicrogridEnv(gymnasium.Env):
   def calculate_bess_discharge_energy(self, action: int):
       """
       Calculates the actual BESS discharge energy based on the selected action,
-      grid import energy (to offset), and BESS available discharge energy.
-
-      Args:
-          action (int): The action index corresponding to a discharge action.
-                       Uses `self.bess_step_sizes[action]` to get the desired discharge amount.
+      UNSCALED grid import energy (to offset), and BESS available discharge energy.
+      Updates self.state.bess_discharge_energy (in kWh).
       """
-
-      discharge_step_size = self.bess_step_sizes[action]
+      discharge_step_size = self.bess_step_sizes[action] # This is in kWh
 
       adjusted_discharge_step_size = 0.0
 
-      # Determine the possible discharge energy from the grid import energy
-      if (self.state.grid_import_energy - discharge_step_size) < 0.0:
+      # Check if the discharge step size can be applied without exceeding grid import energy
+      if (self.state.grid_import_energy_unscaled - discharge_step_size) < 0.0:
           
-          adjusted_discharge_step_size = self.state.grid_import_energy
+          adjusted_discharge_step_size = self.state.grid_import_energy_unscaled
           
       else:
           
@@ -936,6 +940,8 @@ class MicrogridEnv(gymnasium.Env):
   def step(self, action):
       """
       Executes one time step in the environment based on the given action.
+      Reward calculation now uses unscaled values internally via EnvState.
+      The final reward is then scaled using tanh.
 
       Args:
           action: The action taken by the agent.
@@ -953,7 +959,15 @@ class MicrogridEnv(gymnasium.Env):
 
       self.apply_bess_action(action=action)
       
-      self.reward = self.state.get_reward() / self.reward_scale_factor
+      raw_reward = self.state.get_reward()
+    #   self.reward = np.tanh(raw_reward / self.reward_scale_factor)
+      self.reward = raw_reward / self.reward_scale_factor
+
+      if self.debug_flag:
+          log.info(f"""
+          [{self.state.index}] Raw Reward -> {raw_reward: .3f}
+            Scaled Reward -> {self.reward: .3f}
+          """)
 
       self.terminal_state()
 
@@ -968,6 +982,7 @@ class MicrogridEnv(gymnasium.Env):
   def reset(self, seed=None):
       """
       Resets the environment to an initial state.
+      Ensures reward_scale_factor is set.
 
       Args:
           seed (int, optional): The seed that is used to initialize the environment's RNG.
@@ -985,16 +1000,15 @@ class MicrogridEnv(gymnasium.Env):
           np.random.seed(seed)
 
       self.reward = 0.0
-      self.reward_scale_factor = self.env_data['grid_import_energy'].max()
       self.bess_avail_discharge_energy = self.bess_capacity
       self.done = False
       self.truncated = False
       self.state_idx = 0
       self.bess_cycle_counter = 0
       self.bess_prev_action_name = 'do-nothing'
+      
+      # Load the initial state
       self.state = self.load_new_state()
-
-      # log.info(f"First State: {self.state.get_gym_state()}")
       
       return self.state.get_gym_state(), {}
   
