@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
 
 class LoadProfileDataLoader:
     """
@@ -7,7 +9,7 @@ class LoadProfileDataLoader:
 
     This class handles reading CSV data, performing necessary transformations like
     datetime conversion, feature engineering (e.g., one-hot encoding for time-based features),
-    and filtering data based on date ranges.
+    and filtering data based on date ranges. It also supports Min-Max scaling of specified features.
     """
 
     def __init__(self, csv_file_path: str):
@@ -17,8 +19,8 @@ class LoadProfileDataLoader:
         Args:
             csv_file_path (str): The path to the CSV file containing the load profile data.
         """
-
         self.file_path = csv_file_path
+        self.scalers = {}
 
         
     def read_csv_file(self) -> pd.DataFrame:
@@ -67,7 +69,7 @@ class LoadProfileDataLoader:
             return wkd.lower()
 
     
-    def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+    def preprocess_data(self, df: pd.DataFrame, fit_scalers: bool) -> pd.DataFrame:
         """
         Preprocesses the raw load profile DataFrame.
 
@@ -76,17 +78,19 @@ class LoadProfileDataLoader:
         - Extracting the hour of the day.
         - One-hot encoding weekday and time-of-use (TOU) timeslots.
         - Converting the hour into cyclical sine and cosine features.
+        - Applying Min-Max scaling to specified numerical features to the range [-1, 1].
         - Setting the timestamp as the index.
         - Dropping unnecessary original columns.
         - Selecting and ordering the final set of features.
 
         Args:
             df (pd.DataFrame): The raw DataFrame to preprocess.
+            fit_scalers (bool): If True, scalers are fitted to the data before transformation,
+                                and stored. If False, previously fitted scalers are used.
 
         Returns:
-            pd.DataFrame: The preprocessed DataFrame with engineered features.
+            pd.DataFrame: The preprocessed DataFrame with engineered and scaled features.
         """
-
         df['timestamp'] = pd.to_datetime(df['entry_time'], format="mixed")
         df['ts_hour'] = df['timestamp'].dt.hour
 
@@ -102,31 +106,62 @@ class LoadProfileDataLoader:
         df['tou_peak'] = df['tou_time_slot'].map(lambda tou: 1 if tou == 'p' else 0)
 
         # Convert hour field to unit circle coordinates
-        df['ts_hour_sin'] = np.sin( df['ts_hour'] )
-        df['ts_hour_cos'] = np.cos( df['ts_hour'] )
+        df['ts_hour_sin'] = np.sin( ((2*np.pi)/24) * df['ts_hour'] )
+        df['ts_hour_cos'] = np.cos( ((2*np.pi)/24) * df['ts_hour'] )
+
+        # Columns to scale
+        columns_to_scale = ['site_load_energy', 'solar_prod_energy', 'solar_ctlr_setpoint', 'grid_import_energy']
+        
+        for col in columns_to_scale:
+            if col not in df.columns: # Ensure column exists before trying to scale
+                print(f"Warning: Column '{col}' not found in DataFrame for scaling.")
+                continue
+            
+            # Fill NaN values with 0 before scaling
+            feature_data = df[[col]].fillna(0)
+
+            if fit_scalers:
+                scaler = MinMaxScaler(feature_range=(-1, 1))
+                df[col] = scaler.fit_transform(feature_data)
+                self.scalers[col] = scaler
+            elif col in self.scalers:
+                scaler = self.scalers[col]
+                df[col] = scaler.transform(feature_data)
+            else:
+                print(f"Warning: Scaler for column '{col}' not found and fit_scalers is False. Data for this column will not be scaled.")
 
         df.set_index('timestamp', inplace=True)
 
         df.drop(['entry_time', 'ts_hour', 'weekday', 'weekday_fmt', 'tou_time_slot'], axis=1, inplace=True)
 
-        return df[['ts_hour_sin', 'ts_hour_cos', 'tou_offpeak', 'tou_standard', 'tou_peak', 'day_week', 'day_saturday', 'day_sunday', 'site_load_energy', 'solar_prod_energy', 'solar_ctlr_setpoint', 'grid_import_energy']]
+        final_columns = ['ts_hour_sin', 'ts_hour_cos', 'tou_offpeak', 'tou_standard', 'tou_peak', 'day_week', 'day_saturday', 'day_sunday', 'site_load_energy', 'solar_prod_energy', 'solar_ctlr_setpoint', 'grid_import_energy']
+        
+        # Ensure all final columns exist, fill missing ones with a default value (e.g., 0)
+        for col in final_columns:
+            if col not in df.columns:
+                df[col] = 0
+
+        return df[final_columns]
 
 
-    def load_data(self, from_date: str = None, to_date: str = None) -> pd.DataFrame:
+    def load_data(self, from_date: str = None, to_date: str = None, fit_scalers: bool = False) -> pd.DataFrame:
         """
         Loads, preprocesses, and optionally filters the load profile data by date.
+        Scalers are fitted if `fit_scalers` is True.
 
         Args:
             from_date (str, optional): The start date for filtering (YYYY-MM-DD). Defaults to None.
             to_date (str, optional): The end date for filtering (YYYY-MM-DD). Defaults to None.
+            fit_scalers (bool, optional): If True, scalers are fitted to the current data.
+                                         Set to True for training data, False for validation/test data.
+                                         Defaults to False.
 
         Returns:
-            pd.DataFrame: The processed (and potentially filtered) DataFrame.
+            pd.DataFrame: The processed (and potentially filtered and scaled) DataFrame.
         """
-
         df = self.read_csv_file()
         
-        fmt_df = self.preprocess_data(df=df)
+        fmt_df = self.preprocess_data(df=df.copy(), fit_scalers=fit_scalers)
 
         if (from_date is None) and (to_date is None):
 

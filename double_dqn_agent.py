@@ -14,7 +14,7 @@ from ptan.experience import ExperienceFirstLast, ExperienceSourceFirstLast, Prio
 
 import gymnasium as gym
 
-from double_dqn_model import DoubleDQNModel
+from double_dqn_model_big import DoubleDQNModel
 
 import logging as log
 
@@ -340,7 +340,7 @@ class DoubleDQNAgent:
                 self.writer.add_scalar("total_episode_reward", total_episode_reward, episode_number)
                 
                 mean_episode_reward = 0.0
-                if (episode_number % 10) == 0:
+                if (episode_number % 20) == 0:
                     
                     mean_episode_reward = np.mean(episode_rewards)
                     episode_rewards = []
