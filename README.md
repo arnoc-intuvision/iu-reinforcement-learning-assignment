@@ -1,4 +1,4 @@
-# BESS Control with Deep Q-Learning
+# BESS Control with An Enhanced Double Deep Q-Learning Approach
 
 This project implements a Battery Energy Storage System (BESS) controller using Deep Reinforcement Learning, specifically Double Deep Q-Network (Double DQN) algorithms. The system is designed to optimize battery operation in a microgrid environment with solar generation, variable loads, and time-of-use electricity pricing.
 
@@ -94,11 +94,15 @@ This project implements a Battery Energy Storage System (BESS) controller using 
 
 This file implements a Gymnasium environment that simulates a microgrid with solar generation, battery storage, and grid connection. It includes:
 
-- `EnvState`: A dataclass that holds the state of the environment at each timestep
+- `EnvState`: A dataclass that holds the state of the environment at each timestep, storing both scaled values for agent observation and unscaled values for internal environment logic
 - `MicrogridEnv`: The main environment class that implements the Gymnasium interface:
   - `reset()`: Resets the environment to the initial state
   - `step(action)`: Advances the simulation by one step, taking an action and returning the next state, reward, etc.
+  - `update_bess_cycle_counter()`: Updates and resets the BESS cycle counter every 24 steps
+  - `calculate_bess_soc_reward()`: Implements a continuous piecewise reward function for optimal SOC management
+  - `calculate_bess_cycle_penalty()`: Applies an exponential penalty for excessive battery cycling
   - Various helper methods for calculating rewards, state transitions, etc.
+  - Reward scaling using the hyperbolic tangent function for stable learning
 
 ### double_dqn_model.py
 
@@ -125,7 +129,11 @@ This file implements the reinforcement learning agent using the Double DQN algor
 This file contains the `LoadProfileDataLoader` class for:
 
 - Loading load profile data from CSV files
-- Preprocessing the data (normalization, feature engineering)
+- Preprocessing the data including:
+  - Feature engineering (time-of-use encoding, cyclic time features)
+  - Data normalization using MinMaxScaler to scale numerical features to [-1, 1] range
+  - Creating day-of-week indicators
+- Maintaining scaling information for converting between scaled and unscaled values
 - Converting data into formats suitable for the environment
 
 ### BESS_Control_With_Deep_Q-Learning.ipynb
@@ -160,3 +168,24 @@ This Jupyter notebook serves as the main interface for the project, allowing you
 - [PyTorch Documentation](https://pytorch.org/docs/stable/index.html)
 - [TensorBoard Documentation](https://www.tensorflow.org/tensorboard)
 - [PTAN (PyTorch Agent Net) Documentation](https://github.com/Shmuma/ptan)
+
+## Recent Enhancements
+
+### Data Normalization and Unscaled Internal Logic
+- Implemented MinMaxScaler in LoadProfileDataLoader to scale numerical features to [-1, 1] range
+- Enhanced EnvState to store both scaled values (for agent observation) and unscaled values (for internal calculations)
+- Modified reward functions to use unscaled values for more accurate calculations
+
+### Improved Reward Engineering
+- Implemented hyperbolic tangent (tanh) reward scaling for bounded rewards
+- Created a continuous piecewise reward function for BESS State of Charge (SOC) with:
+  - Optimal range (40-70%)
+  - Acceptable ranges (20-40%, 70-90%)
+  - Penalty regions (<20%, >90%)
+- Enhanced BESS cycle penalty with exponential factor based on cycle count
+- Added 24-hour BESS cycle counter reset to properly penalize daily cycling behavior
+
+### Stability and Performance
+- Improved logging for better debugging and analysis
+- Fine-tuned reward scale factor for improved learning stability
+- Enhanced documentation throughout the codebase
