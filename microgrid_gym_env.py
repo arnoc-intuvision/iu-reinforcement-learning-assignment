@@ -8,7 +8,6 @@ import traceback
 import logging as log
 from load_profile_data_loader import LoadProfileDataLoader
 
-
 log.basicConfig(format="Line:%(lineno)d-%(funcName)s-%(levelname)s:  %(message)s")
 log.getLogger().setLevel(log.INFO)
 
@@ -57,6 +56,7 @@ class EnvState:
     debug_flag: bool
 
     # Calculated fields which use unscaled values for their logic
+    grid_import_energy_with_bess: float = field(init=False)
     grid_surplus_energy: float = field(init=False)
     solar_surplus_energy: float = field(init=False)  
     solar_vs_load_ratio: float = field(init=False)
@@ -70,6 +70,7 @@ class EnvState:
         """
         Post-initialization processing for calculated fields.
         """
+        self.grid_import_energy_with_bess = 0.0
         self.grid_surplus_energy = self.get_grid_surplus_energy()
         self.solar_surplus_energy = self.get_solar_surplus_energy()
         self.solar_vs_load_ratio = self.get_solar_vs_load_ratio()
@@ -412,37 +413,66 @@ class EnvState:
 
     def calculate_bess_soc_reward(self):
         """
-        Calculates a reward component based on the BESS State of Charge (SOC).
-        This can be used to incentivize maintaining a certain SOC level.
+        Calculates a continuous reward component based on the BESS State of Charge (SOC).
+        This reward function is designed to keep the SOC between 20% and 90%, with
+        optimal operation in the 40%-70% range.
 
         Returns:
-            float: The reward/penalty related to BESS SOC.
+            float: The reward/penalty related to BESS SOC, rounded to 2 decimal places.
         """
 
-        bess_soc_reward = 0.0
-
         action_is_charge = re.match(r"^charge.*", self.action_name) is not None
-
-        charged_soc_ratio = self.bess_soc / 100.0
-        discharged_soc_ratio = (100.0 - self.bess_soc) / 100.0
+        action_is_discharge = re.match(r"^discharge.*", self.action_name) is not None
+        
+        # Define the ideal SOC range
+        min_soc = 20.0
+        max_soc = 90.0
+        optimal_low = 40.0
+        optimal_high = 70.0
+        
+        # Base reward calculation using a piecewise function
+        if min_soc <= self.bess_soc <= max_soc:
+            # Within the acceptable range
+            if optimal_low <= self.bess_soc <= optimal_high:
+                # In the optimal range - highest reward
+                base_reward = 500.0
+            elif self.bess_soc < optimal_low:
+                # Between min and optimal low - scale reward linearly
+                base_reward = 100.0 + 400.0 * ((self.bess_soc - min_soc) / (optimal_low - min_soc))
+            else:  # self.bess_soc > optimal_high
+                # Between optimal high and max - scale reward linearly
+                base_reward = 100.0 + 400.0 * ((max_soc - self.bess_soc) / (max_soc - optimal_high))
+        else:
+            # Outside acceptable range - apply penalties
+            if self.bess_soc < min_soc:
+                # Below minimum - significant negative reward that grows as SOC approaches 0
+                penalty_factor = 1.0 + 2.0 * ((min_soc - self.bess_soc) / min_soc)
+                base_reward = -1000.0 * penalty_factor
+            else:  # self.bess_soc > max_soc
+                # Above maximum - increasing penalty as SOC approaches 100%
+                penalty_factor = 1.0 + 1.5 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
+                base_reward = -800.0 * penalty_factor
+        
+        # Additional logic for action-specific incentives
+        action_modifier = 0.0
+        if action_is_charge and self.bess_soc >= max_soc:
+            # Extra penalty for charging when already near capacity
+            action_modifier = -500.0 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
+        elif action_is_discharge and self.bess_soc <= min_soc:
+            # Extra penalty for discharging when already near empty
+            action_modifier = -500.0 * ((min_soc - self.bess_soc) / min_soc)
+        
+        # Apply the action-specific modifier
+        bess_soc_reward = base_reward + action_modifier
             
-        if (action_is_charge is True) and (self.bess_soc >= 90.0):
-            
-            bess_soc_reward = -1 * charged_soc_ratio * 100.0
-
-        elif self.bess_soc >= 80.0:
-
-            bess_soc_reward = charged_soc_ratio * 1000.0
-
-        elif self.bess_soc < 20.0:
-            
-            bess_soc_reward = -1 * discharged_soc_ratio * 1000.0
-
         if self.debug_flag:
-
             log.info(f"""
             [{self.index}] BESS SoC Reward: {bess_soc_reward: .2f}
-                    BESS SoC: {self.bess_soc: .2f}
+                    BESS SoC: {self.bess_soc: .2f}%
+                    Action is charge: {action_is_charge}
+                    Action is discharge: {action_is_discharge}
+                    Base reward: {base_reward: .2f}
+                    Action modifier: {action_modifier: .2f}
             """)
 
         return np.round(bess_soc_reward, 2)
@@ -459,9 +489,12 @@ class EnvState:
         bess_cycle_penalty = 0.0
 
         cycle_life = 5000  # Typical Li-ion battery cycle life
-        battery_replacement_cost = 100_000
-        cycle_cost = battery_replacement_cost / cycle_life
-        bess_cycle_penalty = -1 * self.bess_cycle_counter * cycle_cost
+        battery_replacement_cost = 500_000 # Typical cost in USD of replacing a BESS
+        base_cycle_cost = battery_replacement_cost / cycle_life
+
+        cycle_penalty_factor = 1.0 + 0.1 * (self.bess_cycle_counter - 1) if self.bess_cycle_counter > 1 else 1.0
+
+        bess_cycle_penalty = base_cycle_cost * self.bess_cycle_counter * cycle_penalty_factor
 
         self.bess_prev_action_name = self.action_name
 
@@ -489,26 +522,29 @@ class EnvState:
 
         if re.match(r"^charge.*", self.action_name) is not None: # charge
 
-            reward = (- self.calculate_bess_charge_cost() # current cost of charging the bess
-                      + self.calculate_potential_future_discharge_savings_when_charging() # future savings when discharging the bess
-                      + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20%
-                      + self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
-                     )
+            reward = (
+                - self.calculate_bess_charge_cost() # current cost of charging the bess
+                + self.calculate_potential_future_discharge_savings_when_charging() # future savings when discharging the bess
+                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
+                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
+                )
 
         elif re.match(r"^discharge.*", self.action_name) is not None: # discharge
 
-            reward = (+ self.calculate_bess_discharge_saving() # current saving from discharging the bess
-                      - self.calculate_potential_future_charge_cost_when_discharging() # future cost for charging the bess
-                      + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20%
-                      + self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
-                     )
+            reward = (
+                + self.calculate_bess_discharge_saving() # current saving from discharging the bess
+                - self.calculate_potential_future_charge_cost_when_discharging() # future cost for charging the bess
+                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
+                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
+                )
 
         else: # do-nothing
 
-            reward = (+ self.calculate_potential_current_charge_cost_when_do_nothing() # saved cost for not charging the bess now
-                      - self.calculate_potential_current_discharge_savings_when_do_nothing() # missed savings for not discharging the bess now
-                      + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20%
-                     )
+            reward = (
+                + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20%
+                + self.calculate_potential_current_charge_cost_when_do_nothing() # saved cost for not charging the bess now
+                - self.calculate_potential_current_discharge_savings_when_do_nothing() # missed savings for not discharging the bess now
+                )
 
         self.reward_earned = reward
 
@@ -565,7 +601,7 @@ class MicrogridEnv(gymnasium.Env):
       self.state = None
       self.state_idx = 0
       self.reward = 0.0
-      self.reward_scale_factor = 100.0
+      self.reward_scale_factor = 1000.0
       self.done = False
       self.truncated = False
       self.debug_flag = debug_flag
@@ -580,6 +616,7 @@ class MicrogridEnv(gymnasium.Env):
       self.tou_standard_tariff = tou_standard_tariff
       self.tou_offpeak_tariff = tou_offpeak_tariff
       self.solar_ppa_tariff = solar_ppa_tariff
+      self.monitoring_metrics = {}
       self.display_info()
 
 
@@ -784,7 +821,7 @@ class MicrogridEnv(gymnasium.Env):
   def calculate_bess_charge_energy(self, action: int):
       """
       Calculates the actual BESS charge energy based on the selected action,
-      UNSCALED solar surplus, UNSCALED grid surplus, and BESS available capacity.
+      solar surplus, UNSCALED grid surplus, and BESS available capacity.
       Updates self.state.bess_charge_from_solar_energy and self.state.bess_charge_from_grid_energy (in kWh).
       """
       charge_step_size = self.bess_step_sizes[action]
@@ -799,16 +836,19 @@ class MicrogridEnv(gymnasium.Env):
           
           charge_from_grid_import_energy = required_charge_from_grid_import_energy
           charge_from_solar_energy = self.state.solar_surplus_energy
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled + charge_from_grid_import_energy
 
       elif (required_charge_from_grid_import_energy > 0) and (self.state.grid_surplus_energy < required_charge_from_grid_import_energy):
 
           charge_from_grid_import_energy = self.state.grid_surplus_energy
           charge_from_solar_energy = self.state.solar_surplus_energy
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled + charge_from_grid_import_energy
 
       else:
 
           charge_from_grid_import_energy = 0.0
           charge_from_solar_energy = charge_step_size
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled + charge_from_grid_import_energy
 
       adjusted_charge_step_size = charge_from_solar_energy + charge_from_grid_import_energy
       charge_from_solar_prop = 1.0 if charge_from_grid_import_energy == 0.0 else (charge_from_solar_energy / adjusted_charge_step_size)
@@ -842,7 +882,7 @@ class MicrogridEnv(gymnasium.Env):
   def calculate_bess_discharge_energy(self, action: int):
       """
       Calculates the actual BESS discharge energy based on the selected action,
-      UNSCALED grid import energy (to offset), and BESS available discharge energy.
+      grid import energy (to offset), and BESS available discharge energy.
       Updates self.state.bess_discharge_energy (in kWh).
       """
       discharge_step_size = self.bess_step_sizes[action] # This is in kWh
@@ -853,7 +893,7 @@ class MicrogridEnv(gymnasium.Env):
       if (self.state.grid_import_energy_unscaled - discharge_step_size) < 0.0:
           
           adjusted_discharge_step_size = self.state.grid_import_energy_unscaled
-          
+         
       else:
           
           adjusted_discharge_step_size = discharge_step_size 
@@ -863,6 +903,7 @@ class MicrogridEnv(gymnasium.Env):
       if (self.state.bess_avail_discharge_energy - adjusted_discharge_step_size) < 0.0:
 
           self.state.bess_discharge_energy = self.state.bess_avail_discharge_energy
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled - self.state.bess_discharge_energy
 
           # BESS fully discharged
           self.bess_avail_discharge_energy = 0.0
@@ -872,11 +913,38 @@ class MicrogridEnv(gymnasium.Env):
       else:
 
           self.state.bess_discharge_energy = adjusted_discharge_step_size
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled - self.state.bess_discharge_energy
 
           # BESS busy discharging
           self.bess_avail_discharge_energy -= adjusted_discharge_step_size
           self.state.bess_avail_discharge_energy = self.bess_avail_discharge_energy
           self.state.bess_soc = self.state.get_bess_soc()
+
+
+  def update_bess_cycle_counter(self, action: int):
+      """
+      Updates the BESS cycle counter based on the current and previous actions.
+      The BESS cycle counter is incremented when the BESS transitions between charging and discharging states.
+      The counter is reset every 24 steps.
+            
+      Args:
+          action (int): The action index chosen by the agent.
+      """
+      
+      self.state.action_name = self.action_space_dict.get(action, None)
+
+      # Reset BESS cycle counter every 24 steps
+      if (self.state.index % 24) == 0:
+            self.bess_cycle_counter = 0
+            self.state.bess_cycle_counter = self.bess_cycle_counter
+
+      if ( (re.match(r"^charge.*", self.bess_prev_action_name) is not None) and (re.match(r"^discharge.*", self.state.action_name) is not None) ) or \
+           ((re.match(r"^discharge.*", self.bess_prev_action_name) is not None) and (re.match(r"^charge.*", self.state.action_name) is not None) ):
+            self.bess_cycle_counter += 1
+            self.state.bess_cycle_counter = self.bess_cycle_counter
+      
+      self.bess_prev_action_name = self.state.action_name
+      self.state.bess_prev_action_name = self.bess_prev_action_name
 
     
   def apply_bess_action(self, action: int):
@@ -888,7 +956,7 @@ class MicrogridEnv(gymnasium.Env):
       Args:
           action (int): The action index chosen by the agent.
       """
-
+      
       self.state.action_name = self.action_space_dict.get(action, None)
 
       if self.debug_flag:
@@ -897,13 +965,7 @@ class MicrogridEnv(gymnasium.Env):
           [{self.state.index}] Selected BESS Action Name -> {self.state.action_name}
           """)
 
-      if ( (re.match(r"^charge.*", self.bess_prev_action_name) is not None) and (re.match(r"^discharge.*", self.state.action_name) is not None) ) or \
-           ((re.match(r"^discharge.*", self.bess_prev_action_name) is not None) and (re.match(r"^charge.*", self.state.action_name) is not None) ):
-            self.bess_cycle_counter += 1
-            self.state.bess_cycle_counter = self.bess_cycle_counter
-      
-      self.bess_prev_action_name = self.state.action_name
-      self.state.bess_prev_action_name = self.bess_prev_action_name
+      self.update_bess_cycle_counter(action=action)
       
       if re.match(r"^charge.*", self.state.action_name) is not None: # charge
 
@@ -917,13 +979,40 @@ class MicrogridEnv(gymnasium.Env):
 
           self.state.bess_avail_discharge_energy = self.bess_avail_discharge_energy
 
+
+  def update_monitoring_metrics(self, action: int, raw_reward: float):
+        """
+        Updates the monitoring metrics for the current state.
+        This includes energy values and other relevant statistics.
     
+        Returns:
+            None
+        """
+
+        bess_step_sizes = [-1*s if i <= 1 else s for i, s in enumerate(self.bess_step_sizes)]
+
+        self.monitoring_metrics = {
+            "grid_import_energy": self.state.grid_import_energy_unscaled,
+            "grid_import_energy_with_bess": self.state.grid_import_energy_with_bess,
+            "solar_prod_energy": self.state.solar_prod_energy_unscaled,
+            "solar_controller_setpoint": self.state.solar_ctlr_setpoint_unscaled,
+            "bess_soc": self.state.bess_soc,
+            "bess_avail_discharge": self.state.bess_avail_discharge_energy,
+            "bess_discharge_energy": self.state.bess_discharge_energy,
+            "bess_charge_from_grid_energy": self.state.bess_charge_from_grid_energy,
+            "bess_charge_from_solar_energy": self.state.bess_charge_from_solar_energy,
+            "raw_reward_earned": raw_reward,
+            "scaled_reward_earned": self.reward,
+            "action_energy": bess_step_sizes[action]
+        }
+
+
   def terminal_state(self) -> bool:
       """
       Checks if the current state is a terminal state (end of the dataset).
 
       Returns:
-          bool: True if the episode has ended, False otherwise.
+          bool: True if the end of the dataset has been reached, False otherwise.
       """
 
       nr_records = self.env_data.shape[0]
@@ -935,12 +1024,12 @@ class MicrogridEnv(gymnasium.Env):
           log.info("Episode terminal state reached !")
 
       return self.done
-
     
-  def step(self, action):
+
+  def step(self, action: int):
       """
       Executes one time step in the environment based on the given action.
-      Reward calculation now uses unscaled values internally via EnvState.
+      Reward calculation uses unscaled values internally via EnvState.
       The final reward is then scaled using tanh.
 
       Args:
@@ -960,8 +1049,8 @@ class MicrogridEnv(gymnasium.Env):
       self.apply_bess_action(action=action)
       
       raw_reward = self.state.get_reward()
-    #   self.reward = np.tanh(raw_reward / self.reward_scale_factor)
-      self.reward = raw_reward / self.reward_scale_factor
+      self.reward = np.tanh(raw_reward / self.reward_scale_factor) * 10
+      self.update_monitoring_metrics(action=action, raw_reward=raw_reward)
 
       if self.debug_flag:
           log.info(f"""
@@ -976,14 +1065,13 @@ class MicrogridEnv(gymnasium.Env):
     
       self.state = self.load_new_state()
 
-      return self.state.get_gym_state(), float(self.reward), self.done, self.truncated, {}
+      return self.state.get_gym_state(), float(self.reward), self.done, self.truncated, self.monitoring_metrics
 
     
   def reset(self, seed=None):
       """
       Resets the environment to an initial state.
-      Ensures reward_scale_factor is set.
-
+      
       Args:
           seed (int, optional): The seed that is used to initialize the environment's RNG.
                                 Defaults to None.
@@ -1000,17 +1088,20 @@ class MicrogridEnv(gymnasium.Env):
           np.random.seed(seed)
 
       self.reward = 0.0
-      self.bess_avail_discharge_energy = self.bess_capacity
+      self.state_idx = 0
       self.done = False
       self.truncated = False
-      self.state_idx = 0
       self.bess_cycle_counter = 0
+      self.bess_avail_discharge_energy = self.bess_capacity
       self.bess_prev_action_name = 'do-nothing'
       
       # Load the initial state
       self.state = self.load_new_state()
+
+      # Reset the monitoring metrics
+      self.update_monitoring_metrics(action=2, raw_reward=0.0)
       
-      return self.state.get_gym_state(), {}
+      return self.state.get_gym_state(), self.monitoring_metrics
   
 
   def close(self):

@@ -27,16 +27,13 @@ class DoubleDQNModel(nn.Module):
             nn.ReLU(),
             nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
             nn.Linear(512, 1)
         )
 
         self.noisy_layers = [
             NoisyLinear(input_shape, 512), # 0
             NoisyLinear(512, 512),         # 1
-            NoisyLinear(512, 512),         # 2
-            NoisyLinear(512, n_actions)    # 3
+            NoisyLinear(512, n_actions)    # 2
         ]
 
         self.adv_net = nn.Sequential(
@@ -44,9 +41,7 @@ class DoubleDQNModel(nn.Module):
             nn.ReLU(),
             self.noisy_layers[1],
             nn.ReLU(),
-            self.noisy_layers[2],
-            nn.ReLU(),
-            self.noisy_layers[3]
+            self.noisy_layers[2]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
