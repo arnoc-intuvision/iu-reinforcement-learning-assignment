@@ -204,6 +204,7 @@ class EnvState:
     def calculate_bess_discharge_saving(self) -> float:
         """
         Calculates the savings achieved by discharging the BESS instead of importing from the grid.
+        Applies a boost during peak tariff hours to incentivize larger discharges.
        
         Returns:
             float: The total savings from BESS discharge, rounded to 2 decimal places.
@@ -215,7 +216,7 @@ class EnvState:
         if self.debug_flag:
 
             log.info(f"""
-            [{self.index}] Current BESS Discharge Savings: {grid_saving: .2f}
+            [{self.index}] Current BESS Discharge Savings: {grid_saving: .2f} (Peak boost factor {peak_discharge_boost_factor if self.tou_peak else 1.0} applied if peak: {self.tou_peak})
             """)
 
         return np.round(grid_saving, 2)
@@ -395,7 +396,46 @@ class EnvState:
 
         return np.round(potential_current_charge_cost, 2)
 
-    
+
+    def calculate_wasted_solar_surplus_penalty_when_do_nothing(self) -> float:
+        """
+        Calculates the penalty for wasted solar surplus energy when choosing
+        the 'do-nothing' action instead of charging the BESS with available solar.
+        
+        Returns:
+            float: Penalty for wasted solar surplus (negative value).
+        """
+        # Define typical large step size for charge
+        max_charge_kwh_one_step = 1000.0
+        
+        # Calculate available space in BESS
+        space_in_bess_kwh = self.bess_capacity - self.bess_avail_discharge_energy
+        
+        penalty_wasted_solar = 0.0
+        solar_chargeable_this_step_kwh = 0.0 # Initialize for logging
+        if self.solar_surplus_energy > 0:
+            solar_chargeable_this_step_kwh = min(
+                self.solar_surplus_energy, 
+                space_in_bess_kwh, 
+                max_charge_kwh_one_step
+            )
+            
+            if solar_chargeable_this_step_kwh > 0:
+                # This is a penalty if PPA tariff > 0 (cost for solar) and it's wasted.
+                penalty_wasted_solar = -1 * self.solar_ppa_tariff * solar_chargeable_this_step_kwh
+        
+        if self.debug_flag:
+            log.info(f"""
+            [{self.index}] Wasted Solar Surplus Penalty (Do-Nothing): {penalty_wasted_solar: .2f}
+                    Solar Surplus Energy: {self.solar_surplus_energy: .2f} kWh
+                    Space in BESS: {space_in_bess_kwh: .2f} kWh
+                    Solar Chargeable This Step: {solar_chargeable_this_step_kwh: .2f} kWh
+                    Solar PPA Tariff: {self.solar_ppa_tariff: .2f}
+            """)
+            
+        return np.round(penalty_wasted_solar, 2)
+
+
     def calculate_without_bess_cost(self) -> float:
         """
         Calculates the cost of operating the microgrid without the BESS.
@@ -654,7 +694,7 @@ class MicrogridEnv(gymnasium.Env):
       self.state = None
       self.state_idx = 0
       self.reward = 0.0
-      self.reward_scale_factor = 1000.0
+      self.reward_scale_factor = 5000.0
       self.done = False
       self.truncated = False
       self.debug_flag = debug_flag
