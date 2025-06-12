@@ -216,7 +216,7 @@ class EnvState:
         if self.debug_flag:
 
             log.info(f"""
-            [{self.index}] Current BESS Discharge Savings: {grid_saving: .2f} (Peak boost factor {peak_discharge_boost_factor if self.tou_peak else 1.0} applied if peak: {self.tou_peak})
+            [{self.index}] Current BESS Discharge Savings: {grid_saving: .2f})
             """)
 
         return np.round(grid_saving, 2)
@@ -475,7 +475,7 @@ class EnvState:
         
         # Define the ideal SOC range
         min_soc = 10.0
-        max_soc = 90.0
+        max_soc = 100.0
         optimal_low = 20.0 
         optimal_high = 80.0
         
@@ -499,14 +499,15 @@ class EnvState:
                 base_reward = -1000.0 * penalty_factor
             else:  # self.bess_soc > max_soc
                 # Above maximum - increasing penalty as SOC approaches 100%
-                penalty_factor = 1.0 + 1.5 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
-                base_reward = -800.0 * penalty_factor
+                # penalty_factor = 1.0 + 1.5 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
+                # base_reward = -800.0 * penalty_factor
+                base_reward = 0.0
         
         # Additional logic for action-specific incentives
         action_modifier = 0.0
         if action_is_charge and self.bess_soc >= max_soc:
             # Extra penalty for charging when already near capacity
-            action_modifier = -500.0 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
+            action_modifier = -500.0 * (self.bess_soc - max_soc)
         elif action_is_discharge and self.bess_soc <= min_soc:
             # Extra penalty for discharging when already near empty
             action_modifier = -500.0 * ((min_soc - self.bess_soc) / min_soc)
