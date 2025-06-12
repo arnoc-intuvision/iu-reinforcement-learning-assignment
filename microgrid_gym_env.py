@@ -159,6 +159,23 @@ class EnvState:
         """
         return np.round((self.bess_avail_discharge_energy / self.bess_capacity) * 100.0, 2)
 
+    
+    def get_current_grid_tariff(self) -> float:
+        """
+        Returns the current grid tariff based on the time-of-use (TOU) period.
+
+        Returns:
+            float: The current grid tariff rate.
+        """
+        if self.tou_peak:
+            return self.tou_peak_tariff
+        elif self.tou_standard:
+            return self.tou_standard_tariff
+        elif self.tou_offpeak:
+            return self.tou_offpeak_tariff
+        else:
+            return 0.0
+
 
     def calculate_bess_charge_cost(self) -> float:
         """
@@ -167,20 +184,9 @@ class EnvState:
         Returns:
             float: The total cost of charging the BESS, rounded to 2 decimal places.
         """
+        current_grid_tariff = self.get_current_grid_tariff()
 
-        grid_cost = 0.0
-
-        if self.tou_peak:
-            
-            grid_cost = self.tou_peak_tariff * self.bess_charge_from_grid_energy
-            
-        elif self.tou_standard:
-            
-            grid_cost = self.tou_standard_tariff * self.bess_charge_from_grid_energy
-            
-        elif self.tou_offpeak:
-            
-            grid_cost = self.tou_offpeak_tariff * self.bess_charge_from_grid_energy
+        grid_cost = current_grid_tariff * self.bess_charge_from_grid_energy
 
         solar_cost = self.solar_ppa_tariff * self.bess_charge_from_solar_energy
 
@@ -201,21 +207,10 @@ class EnvState:
        
         Returns:
             float: The total savings from BESS discharge, rounded to 2 decimal places.
-        """
-
-        grid_saving = 0.0
-
-        if self.tou_peak:
+        """        
+        current_grid_tariff = self.get_current_grid_tariff()
             
-            grid_saving = self.tou_peak_tariff * self.bess_discharge_energy
-            
-        elif self.tou_standard:
-            
-            grid_saving = self.tou_standard_tariff * self.bess_discharge_energy
-            
-        elif self.tou_offpeak:
-            
-            grid_saving = self.tou_offpeak_tariff * self.bess_discharge_energy
+        grid_saving = current_grid_tariff * self.bess_discharge_energy
             
         if self.debug_flag:
 
@@ -310,71 +305,95 @@ class EnvState:
     def calculate_potential_current_discharge_savings_when_do_nothing(self) -> float:
         """
         Calculates the potential savings if the BESS were to discharge now
-        instead of doing nothing, considering the current grid import.
+        instead of doing nothing, considering the current grid import and
+        available BESS energy.
 
         Returns:
-            float: Potential current discharge savings.
+            float: Potential current discharge savings (missed savings is positive).
         """
-        current_tariff = 1.0
+        current_grid_tariff = self.get_current_grid_tariff()
         
-        if self.tou_peak:
-
-            current_tariff = self.tou_peak_tariff
-            
-        elif self.tou_standard:
-            
-            current_tariff = self.tou_standard_tariff
-            
-        elif self.tou_offpeak:
-            
-            current_tariff = self.tou_offpeak_tariff
+        # Define typical large step size for discharge
+        max_discharge_kwh_one_step = 1000.0
         
-        potential_current_discharge_saving = np.round((current_tariff * self.grid_import_energy_unscaled * self.bess_cycle_efficiency), 2)
+        # Calculate how much energy could be discharged to offset grid import
+        discharge_target_for_grid_offset_kwh = min(
+            self.grid_import_energy_unscaled, 
+            max_discharge_kwh_one_step
+        )
+        
+        # Limit by available energy in the BESS
+        actual_missed_discharge_kwh = min(
+            self.bess_avail_discharge_energy, 
+            discharge_target_for_grid_offset_kwh
+        )
+        
+        # Calculate the missed savings
+        potential_current_discharge_saving = 0.0
+        if actual_missed_discharge_kwh > 0:
+            # Include efficiency in savings calculation
+            savings_per_kwh_bess_to_grid = current_grid_tariff * self.bess_cycle_efficiency
+            potential_current_discharge_saving = actual_missed_discharge_kwh * savings_per_kwh_bess_to_grid
 
         if self.debug_flag:
             log.info(f"""
             [{self.index}] Potential Current BESS Discharge Savings (Do-Nothing) -> {potential_current_discharge_saving: .2f}
                     Grid Import Energy Unscaled: {self.grid_import_energy_unscaled: .2f} kWh
+                    BESS Available Discharge Energy: {self.bess_avail_discharge_energy: .2f} kWh
+                    Actual Missed Discharge: {actual_missed_discharge_kwh: .2f} kWh
                     BESS SoC: {self.bess_soc: .2f}%
-                    TOU Timeslot: Peak={self.tou_peak} , Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
+                    TOU Timeslot: Peak={self.tou_peak}, Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
             """)
-        return potential_current_discharge_saving
+        
+        return np.round(potential_current_discharge_saving, 2)
 
 
     def calculate_potential_current_charge_cost_when_do_nothing(self) -> float:
         """
         Calculates the potential cost if the BESS were to charge now
-        instead of doing nothing, considering available solar and grid surplus.
+        instead of doing nothing, considering available solar, grid surplus,
+        and Notified Maximum Demand (NMD) constraints.
         
         Returns:
-            float: Potential current charging cost.
+            float: Potential current charging cost
         """
-
-        current_tariff = 1.0
+        current_grid_tariff = self.get_current_grid_tariff()
         
-        if self.tou_peak:
-
-            current_tariff = self.tou_peak_tariff
-            
-        elif self.tou_standard:
-            
-            current_tariff = self.tou_standard_tariff
-            
-        elif self.tou_offpeak:
-            
-            current_tariff = self.tou_offpeak_tariff
-
-        potential_current_charge_cost = np.round((current_tariff * self.bess_charge_from_grid_energy - self.solar_ppa_tariff * self.solar_surplus_energy), 2)
+        # Define typical large step size for charge
+        max_charge_kwh_one_step = 1000.0
+        
+        # Calculate available space in BESS
+        space_in_bess_kwh = self.bess_capacity - self.bess_avail_discharge_energy
+        
+        # Calculate available grid capacity before hitting Notified Maximum Demand (NMD)
+        available_headroom_before_nmd_kwh = self.grid_notified_maximum_demand - self.grid_import_energy_unscaled
+        allowable_grid_charge_due_to_nmd_kwh = max(0.0, available_headroom_before_nmd_kwh)
+        
+        # Calculate potential charge amount respecting BESS capacity, step size, and NMD
+        potential_grid_charge_this_step_kwh = min(
+            space_in_bess_kwh,
+            max_charge_kwh_one_step,
+            allowable_grid_charge_due_to_nmd_kwh
+        )
+        
+        # Calculate the saved cost (positive value)
+        potential_current_charge_cost = 0.0
+        if potential_grid_charge_this_step_kwh > 0:
+            # Include efficiency in cost calculation
+            cost_per_kwh_grid_to_bess = current_grid_tariff / (self.bess_cycle_efficiency + 1e-6)  # Add epsilon for division safety
+            potential_current_charge_cost = potential_grid_charge_this_step_kwh * cost_per_kwh_grid_to_bess
 
         if self.debug_flag:
-
             log.info(f"""
             [{self.index}] Potential Current BESS Charge Cost (Do-Nothing): {potential_current_charge_cost: .2f}
                     BESS SoC: {self.bess_soc: .2f}
-                    TOU Timeslot: Peak={self.tou_peak} , Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
+                    Space in BESS: {space_in_bess_kwh: .2f} kWh
+                    NMD Headroom: {available_headroom_before_nmd_kwh: .2f} kWh
+                    Potential Grid Charge: {potential_grid_charge_this_step_kwh: .2f} kWh
+                    TOU Timeslot: Peak={self.tou_peak}, Standard={self.tou_standard}, Off-peak={self.tou_offpeak}
             """)
 
-        return potential_current_charge_cost
+        return np.round(potential_current_charge_cost, 2)
 
     
     def calculate_without_bess_cost(self) -> float:
@@ -384,19 +403,9 @@ class EnvState:
         Returns:
             float: The operational cost without BESS.
         """
-        grid_cost = 0.0
+        current_grid_tariff = self.get_current_grid_tariff()
 
-        if self.tou_peak:
-            
-            grid_cost = self.tou_peak_tariff * self.grid_import_energy_unscaled
-            
-        elif self.tou_standard:
-            
-            grid_cost = self.tou_standard_tariff * self.grid_import_energy_unscaled
-            
-        elif self.tou_offpeak:
-            
-            grid_cost = self.tou_offpeak_tariff * self.grid_import_energy_unscaled
+        grid_cost = current_grid_tariff * self.grid_import_energy_unscaled
 
         solar_cost = self.solar_ppa_tariff * self.solar_prod_energy_unscaled
 
@@ -411,11 +420,11 @@ class EnvState:
         return total_cost
         
 
-    def calculate_bess_soc_reward(self):
+    def calculate_bess_soc_reward(self) -> float:
         """
         Calculates a continuous reward component based on the BESS State of Charge (SOC).
         This reward function is designed to keep the SOC between 20% and 90%, with
-        optimal operation in the 40%-70% range.
+        optimal operation in the 20%-80% range.
 
         Returns:
             float: The reward/penalty related to BESS SOC, rounded to 2 decimal places.
@@ -425,10 +434,10 @@ class EnvState:
         action_is_discharge = re.match(r"^discharge.*", self.action_name) is not None
         
         # Define the ideal SOC range
-        min_soc = 20.0
+        min_soc = 10.0
         max_soc = 90.0
-        optimal_low = 40.0
-        optimal_high = 70.0
+        optimal_low = 20.0 
+        optimal_high = 80.0
         
         # Base reward calculation using a piecewise function
         if min_soc <= self.bess_soc <= max_soc:
@@ -478,7 +487,7 @@ class EnvState:
         return np.round(bess_soc_reward, 2)
     
 
-    def calculate_bess_cycle_penalty(self):
+    def calculate_bess_cycle_penalty(self) -> float:
         """
         Calculates a penalty based on BESS cycling to account for degradation.
 
@@ -521,40 +530,84 @@ class EnvState:
         reward = 0.0
 
         if re.match(r"^charge.*", self.action_name) is not None: # charge
-
+            bess_charge_cost = self.calculate_bess_charge_cost()
+            future_discharge_savings = self.calculate_potential_future_discharge_savings_when_charging()
+            soc_reward = self.calculate_bess_soc_reward()
+            cycle_penalty = self.calculate_bess_cycle_penalty()
+            
             reward = (
-                - self.calculate_bess_charge_cost() # current cost of charging the bess
-                + self.calculate_potential_future_discharge_savings_when_charging() # future savings when discharging the bess
-                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
-                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
-                )
+                - bess_charge_cost                # current cost of charging the bess
+                + future_discharge_savings        # future savings when discharging the bess
+                + soc_reward                      # rewards/penalize the agent for keeping the bess soc in/outside the optimal range
+                - cycle_penalty                   # penalize the agent for cycling the bess too much
+            )
+                
+            if self.debug_flag:
+                log.info(f"""
+                [{self.index}] Charge Reward Components:
+                        Charge Cost: {bess_charge_cost: .2f}
+                        Future Discharge Savings: {future_discharge_savings: .2f}
+                        SOC Reward: {soc_reward: .2f}
+                        Cycle Penalty: {cycle_penalty: .2f}
+                        Net Reward: {reward: .2f}
+                """)
 
         elif re.match(r"^discharge.*", self.action_name) is not None: # discharge
-
+            
+            discharge_saving = self.calculate_bess_discharge_saving()
+            future_charge_cost = self.calculate_potential_future_charge_cost_when_discharging()
+            soc_reward = self.calculate_bess_soc_reward()
+            cycle_penalty = self.calculate_bess_cycle_penalty()
+            
             reward = (
-                + self.calculate_bess_discharge_saving() # current saving from discharging the bess
-                - self.calculate_potential_future_charge_cost_when_discharging() # future cost for charging the bess
-                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
-                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
-                )
+                + discharge_saving                # current saving from discharging the bess
+                - future_charge_cost              # future cost for charging the bess
+                + soc_reward                      # rewards/penalize the agent for keeping the bess soc in/out the optimal range
+                - cycle_penalty                   # penalize the agent for cycling the bess too much
+            )
+                
+            if self.debug_flag:
+                log.info(f"""
+                [{self.index}] Discharge Reward Components:
+                        Discharge Savings: {discharge_saving: .2f}
+                        Future Charge Cost: {future_charge_cost: .2f}
+                        SOC Reward: {soc_reward: .2f}
+                        Cycle Penalty: {cycle_penalty: .2f}
+                        Net Reward: {reward: .2f}
+                """)
 
-        else: # do-nothing
-
+        else:  # 'do-nothing' action
+            
+            soc_reward = self.calculate_bess_soc_reward()
+            saved_charge_cost = self.calculate_potential_current_charge_cost_when_do_nothing()
+            missed_discharge_savings = self.calculate_potential_current_discharge_savings_when_do_nothing()
+            wasted_solar_penalty = self.calculate_wasted_solar_surplus_penalty_when_do_nothing()
+            
             reward = (
-                + self.calculate_bess_soc_reward() # penalize the agent if the bess soc falls below 20%
-                + self.calculate_potential_current_charge_cost_when_do_nothing() # saved cost for not charging the bess now
-                - self.calculate_potential_current_discharge_savings_when_do_nothing() # missed savings for not discharging the bess now
-                )
-
-        self.reward_earned = reward
+                + soc_reward                      # rewards/penalize the agent for keeping the bess soc in/out the optimal range
+                + saved_charge_cost               # saved cost from not charging the bess
+                - missed_discharge_savings        # missed savings from not discharging the bess
+                + wasted_solar_penalty            # penalty for not charging the bess with solar surplus energy
+            )
+            
+            if self.debug_flag:
+                log.info(f"""
+                [{self.index}] Do-Nothing Reward Components:
+                        SOC Reward: {soc_reward: .2f}
+                        Saved Charge Cost: {saved_charge_cost: .2f}
+                        Missed Discharge Savings: {missed_discharge_savings: .2f}
+                        Wasted Solar Penalty: {wasted_solar_penalty: .2f}
+                        Net Reward: {reward: .2f}
+                """)
+        
+        self.reward_earned = np.round(reward, 2)
 
         if self.debug_flag:
-
-          log.info(f"""
-          [{self.index}] Calculated Reward -> {reward: .3f}
-          """)
+            log.info(f"""
+            [{self.index}] Calculated Reward -> {self.reward_earned: .3f}
+            """)
         
-        return reward
+        return self.reward_earned
 
 
 class MicrogridEnv(gymnasium.Env):
@@ -978,6 +1031,16 @@ class MicrogridEnv(gymnasium.Env):
       else: # do-nothing
 
           self.state.bess_avail_discharge_energy = self.bess_avail_discharge_energy
+          # For do-nothing, grid import with BESS equals grid import without BESS
+          self.state.grid_import_energy_with_bess = self.state.grid_import_energy_unscaled
+          
+          if self.debug_flag:
+              log.info(f"""
+              [{self.state.index}] Do-Nothing Action Applied:
+                   BESS SOC: {self.state.bess_soc:.2f}%
+                   Grid Import Energy: {self.state.grid_import_energy_unscaled:.2f} kWh
+                   Solar Surplus Energy: {self.state.solar_surplus_energy:.2f} kWh
+              """)
 
 
   def update_monitoring_metrics(self, action: int, raw_reward: float):

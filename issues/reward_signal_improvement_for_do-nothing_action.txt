@@ -1,0 +1,102 @@
+Update the reward logic in the `microgrid_gym_env.py` file, specifically for the 'do-nothing' action.
+
+Here's the revised `get_reward` method, incorporating the NMD constraint, BESS efficiency, specific step sizes for opportunity cost calculation, and the solar PPA consideration for the 'do-nothing' action:
+
+```python
+# Ensure this method is part of your EnvState class in microgrid_gym_env.py
+
+    def get_reward(self):
+        """
+        Calculates the total reward for the current state and action.
+        This typically involves costs/savings from BESS operations, grid interaction,
+        and potentially penalties or bonuses for SOC levels or cycling.
+
+        Returns:
+            float: The total calculated reward.
+        """
+
+        reward = 0.0
+
+        if re.match(r"^charge.*", self.action_name) is not None: # charge
+
+            reward = (
+                - self.calculate_bess_charge_cost() # current cost of charging the bess
+                + self.calculate_potential_future_discharge_savings_when_charging() # future savings when discharging the bess
+                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
+                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
+                )
+
+        elif re.match(r"^discharge.*", self.action_name) is not None: # discharge
+
+            reward = (
+                + self.calculate_bess_discharge_saving() # current saving from discharging the bess
+                - self.calculate_potential_future_charge_cost_when_discharging() # future cost for charging the bess
+                + self.calculate_bess_soc_reward() # rewards/penalize the agent for keeping the bess soc in the optimal range
+                - self.calculate_bess_cycle_penalty() # penalize the agent for cycling the bess too much
+                )
+
+        else:  # 'do-nothing' action
+            soc_reward = self.calculate_bess_soc_reward()
+
+            current_grid_tariff = 0.0
+            if self.tou_peak:
+                current_grid_tariff = self.tou_peak_tariff
+            elif self.tou_standard:
+                current_grid_tariff = self.tou_standard_tariff
+            elif self.tou_offpeak:
+                current_grid_tariff = self.tou_offpeak_tariff
+
+            # Define typical large step sizes for opportunity cost calculation.
+            # Note: Ideally, these would be derived from MicrogridEnv's self.bess_step_sizes
+            # and made accessible to EnvState if not already.
+            # For example, if bess_step_sizes = [1000, 250, 0, 250, 1000] where indices 0 and 4
+            # correspond to the largest charge/discharge actions.
+            max_charge_kwh_one_step = 1000.0
+            max_discharge_kwh_one_step = 1000.0
+
+            # --- 1. R_save_charge_value (Saved cost of NOT grid charging this step, respecting NMD) ---
+            space_in_bess_kwh = self.bess_capacity - self.bess_avail_discharge_energy
+            
+            # Calculate available grid capacity before hitting Notified Maximum Demand (NMD)
+            available_headroom_before_nmd_kwh = self.grid_notified_maximum_demand - self.grid_import_energy_unscaled
+            allowable_grid_charge_due_to_nmd_kwh = max(0.0, available_headroom_before_nmd_kwh)
+
+            potential_grid_charge_this_step_kwh = min(space_in_bess_kwh,
+                                                      max_charge_kwh_one_step,
+                                                      allowable_grid_charge_due_to_nmd_kwh)
+            
+            r_save_charge_value = 0.0
+            if potential_grid_charge_this_step_kwh > 0:
+                cost_per_kwh_grid_to_bess = current_grid_tariff / (self.bess_cycle_efficiency + 1e-6) # Add epsilon for division safety
+                r_save_charge_value = potential_grid_charge_this_step_kwh * cost_per_kwh_grid_to_bess
+
+            # --- 2. P_missed_discharge_value (Missed savings from NOT discharging to offset grid import this step) ---
+            discharge_target_for_grid_offset_kwh = min(self.grid_import_energy_unscaled, max_discharge_kwh_one_step)
+            actual_missed_discharge_kwh = min(self.bess_avail_discharge_energy, discharge_target_for_grid_offset_kwh)
+
+            p_missed_discharge_value = 0.0
+            if actual_missed_discharge_kwh > 0:
+                savings_per_kwh_bess_to_grid = current_grid_tariff * self.bess_cycle_efficiency
+                p_missed_discharge_value = actual_missed_discharge_kwh * savings_per_kwh_bess_to_grid
+                
+            # --- 3. Penalty for not using available solar (if solar_ppa_tariff is a cost) ---
+            penalty_wasted_solar = 0.0
+            if self.solar_surplus_energy > 0: # self.solar_surplus_energy is from EnvState post_init
+                solar_chargeable_this_step_kwh = min(self.solar_surplus_energy, space_in_bess_kwh, max_charge_kwh_one_step)
+                if solar_chargeable_this_step_kwh > 0:
+                    # This is a penalty if PPA tariff > 0 (cost for solar) and it's wasted.
+                    penalty_wasted_solar = -1 * self.solar_ppa_tariff * solar_chargeable_this_step_kwh
+
+            # --- Net Reward for 'do-nothing' ---
+            reward = soc_reward + r_save_charge_value - p_missed_discharge_value + penalty_wasted_solar
+            
+        self.reward_earned = np.round(reward, 2) # Ensure consistent rounding
+
+        if self.debug_flag:
+
+          log.info(f"""
+          [{self.index}] Calculated Reward -> {self.reward_earned: .3f}
+          """)
+        
+        return self.reward_earned # Return the stored, rounded reward
+```
