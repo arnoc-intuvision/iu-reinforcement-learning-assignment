@@ -262,15 +262,18 @@ class DoubleDQNAgent:
         Returns:
             The total reward for the episode.
         """
+        steps_summed = 0
         total_reward = 0.0
         
         for e in list(reversed(self.exp_buffer.buffer)):
 
-            if e.last_state is None:
+            # Stop if the episode length has been reached or if the last state of the dataset has been reached.
+            if (steps_summed >= (self.episode_len - 1)) or (e.last_state is None):
                 break
 
+            steps_summed += 1
             total_reward += e.reward
-            
+
         return total_reward
         
     
@@ -327,12 +330,12 @@ class DoubleDQNAgent:
             self.dqn_net.reset_noise()
 
             # Check if the tgt_dqn_net model's weights needs to be synced with the dqn_net model's weights
-            if (self.total_steps % self.target_model_sync_steps) == 0:
+            if (self.total_steps >= self.episode_len) and (self.total_steps % self.target_model_sync_steps) == 0:
                 print(f"    [{self.total_steps}] -> Sync target model weights !")
                 self.tgt_dqn_net.sync()
 
             # Check if the episode length has been reached, and calculate the total episode reward
-            if (self.total_steps % self.episode_len) == 0:
+            if (self.total_steps >= self.episode_len) and (self.total_steps % self.episode_len) == 0:
                 
                 total_episode_reward = self.calculate_total_episode_reward()
                 episode_rewards.append(total_episode_reward)
