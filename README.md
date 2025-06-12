@@ -171,21 +171,28 @@ This Jupyter notebook serves as the main interface for the project, allowing you
 
 ## Recent Enhancements
 
-### Data Normalization and Unscaled Internal Logic
-- Implemented MinMaxScaler in LoadProfileDataLoader to scale numerical features to [-1, 1] range
-- Enhanced EnvState to store both scaled values (for agent observation) and unscaled values (for internal calculations)
-- Modified reward functions to use unscaled values for more accurate calculations
+### Optimized Reward Scaling for Better Time-of-Use (TOU) Arbitrage
+- Fine-tuned reward scaling mechanism using hyperbolic tangent (tanh) with optimized scale factor of 5000
+- Enhanced reward differentiation between action magnitudes:
+  - 250 kWh discharge during peak: scaled reward ≈ 3.02
+  - 1000 kWh discharge during peak: scaled reward ≈ 8.48
+  - Clear differentiation (difference of 5.46) helps agent learn optimal discharge strategies
+- This optimization helps the agent better capitalize on peak TOU periods for maximum cost savings
 
-### Improved Reward Engineering
-- Implemented hyperbolic tangent (tanh) reward scaling for bounded rewards
-- Created a continuous piecewise reward function for BESS State of Charge (SOC) with:
-  - Optimal range (40-70%)
-  - Acceptable ranges (20-40%, 70-90%)
-  - Penalty regions (<20%, >90%)
-- Enhanced BESS cycle penalty with exponential factor based on cycle count
-- Added 24-hour BESS cycle counter reset to properly penalize daily cycling behavior
+### Improved Agent Configuration
+- Adjusted experience buffer sizes and sampling for better memory efficiency:
+  - Batch size: 168 (7 episodes)
+  - Buffer size: 24000 (1000 episodes)
+  - Minimum samples before training: 504 (21 episodes)
+- Optimized target network sync frequency to 216 steps (9 episodes)
+- Enhanced beta parameter increment for prioritized experience replay
 
-### Stability and Performance
-- Improved logging for better debugging and analysis
-- Fine-tuned reward scale factor for improved learning stability
-- Enhanced documentation throughout the codebase
+### Enhanced Model Architecture
+- Added support for different model sizes (big and small variants)
+- Improved model checkpointing with timestamp-based versioning
+- Added capability to save best model weights during training
+
+### New Analysis Tools
+- Added results analysis directory for post-training evaluation
+- Implemented TensorBoard data processing scripts
+- Enhanced monitoring and metric collection during training and testing
