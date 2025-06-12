@@ -607,7 +607,7 @@ class EnvState:
             [{self.index}] Calculated Reward -> {self.reward_earned: .3f}
             """)
         
-        return self.reward_earned # Return the stored, rounded reward
+        return self.reward_earned
 
 
 class MicrogridEnv(gymnasium.Env):
