@@ -475,7 +475,7 @@ class EnvState:
         
         # Define the ideal SOC range
         min_soc = 10.0
-        max_soc = 100.0
+        max_soc = 95.0
         optimal_low = 20.0 
         optimal_high = 80.0
         
@@ -498,19 +498,16 @@ class EnvState:
                 penalty_factor = 1.0 + 2.0 * ((min_soc - self.bess_soc) / min_soc)
                 base_reward = -1000.0 * penalty_factor
             else:  # self.bess_soc > max_soc
-                # Above maximum - increasing penalty as SOC approaches 100%
-                # penalty_factor = 1.0 + 1.5 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
-                # base_reward = -800.0 * penalty_factor
-                base_reward = 0.0
+                base_reward = 250.0
         
         # Additional logic for action-specific incentives
         action_modifier = 0.0
         if action_is_charge and self.bess_soc >= max_soc:
             # Extra penalty for charging when already near capacity
-            action_modifier = -500.0 * (self.bess_soc - max_soc)
+            action_modifier = -250.0 * ((self.bess_soc - max_soc) / (100.0 - max_soc))
         elif action_is_discharge and self.bess_soc <= min_soc:
             # Extra penalty for discharging when already near empty
-            action_modifier = -500.0 * ((min_soc - self.bess_soc) / min_soc)
+            action_modifier = -250.0 * ((min_soc - self.bess_soc) / min_soc)
         
         # Apply the action-specific modifier
         bess_soc_reward = base_reward + action_modifier
@@ -569,12 +566,21 @@ class EnvState:
         """
 
         reward = 0.0
+        w_bess_charge_cost = 1.0
+        w_future_discharge_savings = 1.0
+        w_discharge_saving = 1.0
+        w_future_charge_cost = 1.0
+        w_saved_charge_cost = 1.0
+        w_missed_discharge_savings = 1.0
+        w_wasted_solar_penalty = 1.2
+        w_soc_reward = 0.8
+        w_cycle_penalty = 0.8
 
         if re.match(r"^charge.*", self.action_name) is not None: # charge
-            bess_charge_cost = self.calculate_bess_charge_cost()
-            future_discharge_savings = self.calculate_potential_future_discharge_savings_when_charging()
-            soc_reward = self.calculate_bess_soc_reward()
-            cycle_penalty = self.calculate_bess_cycle_penalty()
+            bess_charge_cost = w_bess_charge_cost * self.calculate_bess_charge_cost()
+            future_discharge_savings = w_future_discharge_savings * self.calculate_potential_future_discharge_savings_when_charging()
+            soc_reward = w_soc_reward * self.calculate_bess_soc_reward()
+            cycle_penalty = w_cycle_penalty * self.calculate_bess_cycle_penalty()
             
             reward = (
                 - bess_charge_cost                # current cost of charging the bess
@@ -595,10 +601,10 @@ class EnvState:
 
         elif re.match(r"^discharge.*", self.action_name) is not None: # discharge
             
-            discharge_saving = self.calculate_bess_discharge_saving()
-            future_charge_cost = self.calculate_potential_future_charge_cost_when_discharging()
-            soc_reward = self.calculate_bess_soc_reward()
-            cycle_penalty = self.calculate_bess_cycle_penalty()
+            discharge_saving = w_discharge_saving * self.calculate_bess_discharge_saving()
+            future_charge_cost = w_future_charge_cost * self.calculate_potential_future_charge_cost_when_discharging()
+            soc_reward = w_soc_reward * self.calculate_bess_soc_reward()
+            cycle_penalty = w_cycle_penalty * self.calculate_bess_cycle_penalty()
             
             reward = (
                 + discharge_saving                # current saving from discharging the bess
@@ -619,10 +625,10 @@ class EnvState:
 
         else:  # 'do-nothing' action
             
-            soc_reward = self.calculate_bess_soc_reward()
-            saved_charge_cost = self.calculate_potential_current_charge_cost_when_do_nothing()
-            missed_discharge_savings = self.calculate_potential_current_discharge_savings_when_do_nothing()
-            wasted_solar_penalty = self.calculate_wasted_solar_surplus_penalty_when_do_nothing()
+            soc_reward = w_soc_reward * self.calculate_bess_soc_reward()
+            saved_charge_cost = w_saved_charge_cost * self.calculate_potential_current_charge_cost_when_do_nothing()
+            missed_discharge_savings = w_missed_discharge_savings * self.calculate_potential_current_discharge_savings_when_do_nothing()
+            wasted_solar_penalty = w_wasted_solar_penalty * self.calculate_wasted_solar_surplus_penalty_when_do_nothing()
             
             reward = (
                 + soc_reward                      # rewards/penalize the agent for keeping the bess soc in/out the optimal range
@@ -695,7 +701,7 @@ class MicrogridEnv(gymnasium.Env):
       self.state = None
       self.state_idx = 0
       self.reward = 0.0
-      self.reward_scale_factor = 5000.0
+      self.reward_scale_factor = 10_000.0
       self.done = False
       self.truncated = False
       self.debug_flag = debug_flag
